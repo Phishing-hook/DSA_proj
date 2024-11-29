@@ -1,9 +1,12 @@
 import sys
+import os
+import requests
 import MySQLdb as sql
-from PyQt5.QtWidgets import QMessageBox, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSpacerItem, QSizePolicy, \
-    QPushButton, QLabel, QLineEdit, QApplication
-from PyQt5.QtGui import QFont, QIcon
-from PyQt5.QtCore import Qt
+from PyQt5.QtWidgets import QMessageBox, QMainWindow, QWidget, QVBoxLayout, QScrollArea, QHBoxLayout, QSpacerItem, \
+    QSizePolicy, \
+    QPushButton, QLabel, QLineEdit, QApplication, QTableWidget, QListWidget, QStackedLayout
+from PyQt5.QtGui import QFont, QIcon, QPixmap, QMovie
+from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
 
 
 def toggle_password_visibility(password_input, button):
@@ -21,6 +24,7 @@ class Auth(QMainWindow):
         super().__init__()
 
         # Set window properties (frameless and fixed size)
+        self.main_app = None
         self.setWindowFlags(Qt.FramelessWindowHint)  # Removes the title bar
         self.setFixedSize(600, 400)  # Fixes the window size
 
@@ -84,7 +88,7 @@ class Auth(QMainWindow):
         password_layout = QHBoxLayout()
 
         toggle_button = QPushButton()
-        toggle_button.setIcon(QIcon("eye.png"))
+        toggle_button.setIcon(QIcon("view.png"))
         toggle_button.setFixedSize(30, 30)
         toggle_button.setStyleSheet("border: none;")
         toggle_button.clicked.connect(lambda: toggle_password_visibility(self.password_input, toggle_button))
@@ -194,9 +198,13 @@ class Auth(QMainWindow):
 
                     if result:
                         QMessageBox.information(self, "Success", "Login successful!")
-                        # Clear input fields and proceed to next window if needed
                         self.username_input.clear()
                         self.password_input.clear()
+
+                        # Create MainApp window only after successful login
+                        self.main_app = MainApp()  # Initialize MainApp only here
+                        self.open_main_app()
+
                     else:
                         QMessageBox.warning(self, "Login Failed", "Invalid username or password!")
 
@@ -204,25 +212,134 @@ class Auth(QMainWindow):
                 QMessageBox.critical(self, "Database Error", f"Error during login: {e}")
             finally:
                 conn.close()
+
         else:
             QMessageBox.critical(self, "Connection Error", "Failed to connect to the database.")
 
+    def open_main_app(self):
+        """Opens the main app window after successful login."""
+        self.close()  # Close the login screen
+        self.main_app.show()
+
     def center_window(self):
-        """Centers the window on the screen."""
         screen = QApplication.primaryScreen().geometry()
         window_geometry = self.frameGeometry()
         window_geometry.moveCenter(screen.center())
         self.move(window_geometry.topLeft())
 
 
-class MainApp:
+class FetchBooksThread(QThread):
+    """Thread to fetch book data from the Google Books API."""
+    data_fetched = pyqtSignal(list)  # Signal emitted when data is fetched
+
+    def __init__(self, query):
+        super().__init__()
+        self.query = query
+
+    def run(self):
+        """Fetch data from Google Books API."""
+        try:
+            response = requests.get(
+                f"https://www.googleapis.com/books/v1/volumes?q={self.query}"
+            )
+            if response.status_code == 200:
+                books = response.json().get("items", [])
+                book_titles = [book["volumeInfo"].get("title", "Unknown Title") for book in books]
+                self.data_fetched.emit(book_titles)
+            else:
+                self.data_fetched.emit([])
+        except Exception:
+            self.data_fetched.emit([])
+
+
+class BookApp(QMainWindow):
     def __init__(self):
-        pass
+        super().__init__()
+        self.setWindowTitle("Book Search App")
+        self.setGeometry(100, 100, 600, 400)
+
+        self.init_ui()
+
+        # Fetch initial books when the app starts
+        self.fetch_initial_books()
+
+    def init_ui(self):
+        """Initialize the main UI layout."""
+        self.central_widget = QWidget()
+        self.setCentralWidget(self.central_widget)
+
+        # Main layout
+        self.layout = QVBoxLayout(self.central_widget)
+
+        # Search bar
+        self.search_bar = QLineEdit()
+        self.search_bar.setPlaceholderText("Search for books...")
+        self.search_bar.setStyleSheet("font-size: 16px; padding: 5px;")
+        self.search_bar.returnPressed.connect(self.fetch_books)
+
+        # Book list
+        self.book_list = QListWidget()
+        self.book_list.setStyleSheet("font-size: 14px;")
+
+        # Loading spinner
+        self.spinner = QLabel()
+        self.movie = QMovie("./assets/loading.gif")  # Add a spinner.gif file in your directory
+        self.spinner.setMovie(self.movie)
+        self.spinner.setAlignment(Qt.AlignCenter)
+
+        # Stacked layout to switch between loading spinner and book list
+        self.stacked_layout = QStackedLayout()
+        self.stacked_layout.addWidget(self.book_list)
+        self.stacked_layout.addWidget(self.spinner)
+
+        # Add widgets to main layout
+        self.layout.addWidget(self.search_bar)
+        self.layout.addLayout(self.stacked_layout)
+
+    def fetch_initial_books(self):
+        """Fetch a default set of books when the app starts."""
+        self.switch_to_spinner()
+        self.thread = FetchBooksThread("bestsellers")  # Default query for initial books
+        self.thread.data_fetched.connect(self.display_books)
+        self.thread.start()
+
+    def fetch_books(self):
+        """Fetch books based on the search query."""
+        query = self.search_bar.text().strip()
+        if not query:
+            return
+
+        self.switch_to_spinner()
+        self.thread = FetchBooksThread(query)
+        self.thread.data_fetched.connect(self.display_books)
+        self.thread.start()
+
+    def switch_to_spinner(self):
+        """Switch to the loading spinner."""
+        self.spinner.show()
+        self.movie.start()
+        self.stacked_layout.setCurrentWidget(self.spinner)
+
+    def switch_to_book_list(self):
+        """Switch to the book list."""
+        self.movie.stop()
+        self.spinner.hide()
+        self.stacked_layout.setCurrentWidget(self.book_list)
+
+    def display_books(self, books):
+        """Display the fetched books in the list widget."""
+        self.book_list.clear()
+        if books:
+            for book in books:
+                QListWidgetItem(book, self.book_list)
+        else:
+            QListWidgetItem("No results found.", self.book_list)
+        self.switch_to_book_list()
 
 
 def main():
     app = QApplication(sys.argv)
-    window = Auth()
+    window = BookApp()
     window.show()
     sys.exit(app.exec_())
 
